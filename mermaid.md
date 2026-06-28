@@ -1,3 +1,4 @@
+'''mermaid
 flowchart TD
 
 subgraph L1["Layer 1 — DATA (no imports, no side-effects)"]
@@ -45,3 +46,4 @@ APP -->|"calls"| SD
 APP -->|"creates / calls refresh()"| AV
 APP -->|"creates / calls update()"| BV
 APP -->|"orbitBy · zoomBy"| SV
+'''
