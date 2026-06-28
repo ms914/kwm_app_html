@@ -1,4 +1,5 @@
 '''mermaid
+
 flowchart TD
 
 subgraph L1["Layer 1 — DATA (no imports, no side-effects)"]
