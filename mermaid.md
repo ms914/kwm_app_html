@@ -1,4 +1,4 @@
-'''mermaid
+```mermaid
 
 flowchart TD
 
@@ -47,4 +47,4 @@ APP -->|"calls"| SD
 APP -->|"creates / calls refresh()"| AV
 APP -->|"creates / calls update()"| BV
 APP -->|"orbitBy · zoomBy"| SV
-'''
+```
