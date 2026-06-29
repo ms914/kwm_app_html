@@ -1,4 +1,4 @@
-I can see the full picture now. This is a sophisticated **KWM (Keyword/Valence-shell Molecular) MVP** — a 3D molecular builder built in Three.js with a clean 4-layer architecture (Data → Logic → Renderer → Controller).
+This is a sophisticated **KWM (Keyword/Valence-shell Molecular) MVP** — a 3D molecular builder built in Three.js with a clean 4-layer architecture (Data → Logic → Renderer → Controller).
 
 Here's a summary of what it does and how it's structured:
 
@@ -19,4 +19,4 @@ Here's a summary of what it does and how it's structured:
 - Algorithm log panel showing every step of snap detection and bonding
 - Atom state inspector in the sidebar
 
-Is there something specific you'd like to do with this file — extend it, debug it, refactor something, or something else?
+
