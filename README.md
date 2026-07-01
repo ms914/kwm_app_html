@@ -2,7 +2,7 @@ This is a **KWM (Keyword/Valence-shell Molecular) MVP** — a 3D molecular build
 
 **What it is:** An interactive 3D molecular modeling tool where you can place atoms (H, He, C, N, O, F, Cl), move them near each other, and form chemical bonds based on electron cloud proximity detection — with real KWM geometry applied when bonds form.
 
-**Architecture (4 strict layers):**
+**Architecture :**
 
 - **Layer 1 — Data (`ChemData`):** Element table with valence electrons, radii, colors; tetrahedral/trigonal geometry presets; snap threshold constants. Zero side effects.
 - **Layer 2 — Logic (`KWMGeometry`, `AtomState`, `BondManager`, `SnapDetector`):** All chemistry math — cloud direction vectors, snap detection, bond formation/breaking, molecular orientation. Pure JS, zero Three.js.
