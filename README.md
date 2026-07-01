@@ -4,8 +4,8 @@ This is a **KWM (Keyword/Valence-shell Molecular) MVP** — a 3D molecular build
 
 **Architecture :**
 
-- **Layer 1 — Data (`ChemData`):** Element table with valence electrons, radii, colors; tetrahedral/trigonal geometry presets; snap threshold constants. Zero side effects.
-- **Layer 2 — Logic (`KWMGeometry`, `AtomState`, `BondManager`, `SnapDetector`):** All chemistry math — cloud direction vectors, snap detection, bond formation/breaking, molecular orientation. Pure JS, zero Three.js.
+- **Layer 1 — Data (`ChemData`):** Element table with valence electrons, radii, colors; tetrahedral/trigonal geometry presets; snap threshold constants.
+- **Layer 2 — Logic (`KWMGeometry`, `AtomState`, `BondManager`, `SnapDetector`):** All chemistry math — cloud direction vectors, snap detection, bond formation/breaking, molecular orientation.
 - **Layer 3 — Renderer (`SceneView`, `AtomView`, `BondView`):** All Three.js lives here — meshes, lights, camera orbit, cloud highlight sprites, bond cylinders. Reads from Logic, never writes back.
 - **Layer 4 — Controller (`App`):** Thin glue — wires DOM events to Logic, pushes state changes to Renderer, manages mode (camera vs. move).
 
