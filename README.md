@@ -1,6 +1,4 @@
-This is a sophisticated **KWM (Keyword/Valence-shell Molecular) MVP** — a 3D molecular builder built in Three.js with a clean 4-layer architecture (Data → Logic → Renderer → Controller).
-
-Here's a summary of what it does and how it's structured:
+This is a **KWM (Keyword/Valence-shell Molecular) MVP** — a 3D molecular builder built in Three.js with a clean 4-layer architecture (Data → Logic → Renderer → Controller).
 
 **What it is:** An interactive 3D molecular modeling tool where you can place atoms (H, He, C, N, O, F, Cl), move them near each other, and form chemical bonds based on electron cloud proximity detection — with real KWM geometry applied when bonds form.
 
