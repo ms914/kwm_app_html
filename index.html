@@ -20,6 +20,15 @@
       --sans:     Georgia, serif;
     }
 
+    /* ── Day theme ─────────────────────────────────────────────────────── */
+    body.day {
+      --bg:#e8eaf0; --panel:#f4f5f8; --border:#c8ccd8; --accent:#1a6fd4;
+      --green:#1a9e62; --red:#c0392b; --gold:#b8860b; --dim:#8890aa;
+      --text:#1a1e2e; --text-dim:#5a6080;
+    }
+    body.day button:hover  { background: #e0e4f0; }
+    body.day button.active { background: #d0dff8; }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
@@ -278,6 +287,8 @@
   </div>
   <div class="sep"></div>
   <button id="btn-clear" class="danger">✕ Reset</button>
+  <div class="sep"></div>
+  <button id="btn-theme">☀ Day</button>
 </header>
 
 <!-- ═══════════════════════ SIDEBAR ════════════════════════════════════ -->
@@ -320,6 +331,7 @@
   <span><span class="leg-dot" style="background:#f0c040"></span>snap-ready highlight</span>
   <span><span class="leg-rect" style="background:#3ecf8e"></span>bond cloud</span>
   <span style="color:#4e8ef7">⬡ = bond button visible when clouds are within snap distance (0.5u)</span>
+  <span style="color:#606888">move mode: core+left = translate XZ · core+right = translate Y · cloud+left = rotate · bonded group moves as one</span>
 </div>
 
 <!-- THREE.js from CDN — external library boundary clearly marked -->
@@ -459,47 +471,90 @@ const KWMGeometry = (() => {
     return r.length() > 1e-6 ? r.normalize() : null;
   }
 
-  // For a partner atom whose bonding clouds face along `bondAxis`,
-  // return cloud directions that:
-  //   • point bonding clouds back toward the central atom
-  //   • align the non-bonding (free) clouds coplanar with `centralFreeDirs`
-  //     via a torsion rotation around the bond axis.
-  function mirrorDirections(numClouds, bondCloudIndices, bondAxis, centralFreeDirs) {
+  // Apply a quaternion (as {x,y,z,w}) to a Vec3, return new Vec3
+  function applyQuat(v, q) {
+    // Rodrigues via quaternion sandwich: q * v * q^-1
+    const ix =  q.w*v.x + q.y*v.z - q.z*v.y;
+    const iy =  q.w*v.y + q.z*v.x - q.x*v.z;
+    const iz =  q.w*v.z + q.x*v.y - q.y*v.x;
+    const iw = -q.x*v.x - q.y*v.y - q.z*v.z;
+    return new Vec3(
+      ix*q.w + iw*(-q.x) + iy*(-q.z) - iz*(-q.y),
+      iy*q.w + iw*(-q.y) + iz*(-q.x) - ix*(-q.z),
+      iz*q.w + iw*(-q.z) + ix*(-q.y) - iy*(-q.x),
+    ).normalize();
+  }
+
+  // Quaternion that rotates unit-vector `from` onto unit-vector `to`
+  function quatFromTo(from, to) {
+    const dot = Math.max(-1, Math.min(1, from.dot(to)));
+    if (dot > 0.9999) return { x: 0, y: 0, z: 0, w: 1 };
+    if (dot < -0.9999) {
+      // 180° — find any perpendicular axis
+      let perp = new Vec3(1, 0, 0);
+      if (Math.abs(from.x) > 0.9) perp = new Vec3(0, 1, 0);
+      const ax = from.cross(perp).normalize();
+      return { x: ax.x, y: ax.y, z: ax.z, w: 0 };
+    }
+    const ax = from.cross(to);          // not yet normalised
+    const w  = 1 + dot;
+    const n  = Math.sqrt(ax.x**2 + ax.y**2 + ax.z**2 + w**2);
+    return { x: ax.x/n, y: ax.y/n, z: ax.z/n, w: w/n };
+  }
+
+  // Multiply two quaternions
+  function quatMul(a, b) {
+    return {
+      x:  a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+      y:  a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+      z:  a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+      w:  a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+    };
+  }
+
+  // Orient partner atom clouds so that:
+  //   1. The average of its bonding-cloud directions points along -bondAxis
+  //      (toward the central atom) — this is a quaternion rotation of the
+  //      entire base frame.
+  //   2. A second rotation around the bond axis aligns the partner's free
+  //      clouds coplanar with the central atom's free clouds (torsion fix).
+  //
+  // centralBondDirs: directions of the CENTRAL atom's bonding clouds (for
+  //   torsion reference — we align partner free-cloud perp to central free-
+  //   cloud perp, derived from the complement of centralBondDirs).
+  // Step 1 (always): rotate partner base frame so bonding-cloud average → -bondAxis.
+  // Step 2 (double bond): torsion to align lone-pair plane normals so all lone
+  //   pairs and both nuclei are coplanar (σ-plane); bonding clouds above/below (π).
+  function mirrorDirections(numClouds, bondCloudIndices, bondAxis, centralFreeDirs, bondOrder) {
     const dirs = baseDirections(numClouds);
     const axis = new Vec3(bondAxis.x, bondAxis.y, bondAxis.z).normalize();
+    const negAxis = axis.clone().scale(-1);
 
-    // Step 1: flip bonding clouds to face the central atom; reflect free clouds
-    const flipped = dirs.map((dir, i) => {
-      if (bondCloudIndices.includes(i)) {
-        return dir.clone().scale(-1).normalize();
-      } else {
-        const dot = dir.dot(axis);
-        return dir.clone().sub(axis.clone().scale(2 * dot)).normalize();
-      }
-    });
+    // ── Step 1 ────────────────────────────────────────────────────────────────
+    const partnerBondAvg = new Vec3();
+    bondCloudIndices.forEach(ci => partnerBondAvg.add(dirs[ci]));
+    partnerBondAvg.scale(1 / bondCloudIndices.length).normalize();
 
-    // Step 2: torsion correction — rotate partner frame around bond axis so that
-    // its bonding clouds' perpendicular component matches the central atom's
-    // bonding clouds' perpendicular component (eclipsed configuration, correct
-    // for double bonds: ellipses coplanar, lone pairs coplanar).
-    if (centralFreeDirs && centralFreeDirs.length > 0) {
-      const partnerBondProj = projectOnPlane(flipped[bondCloudIndices[0]], axis);
-      const centralBondProj = projectOnPlane(centralFreeDirs[0],           axis);
+    const q1 = quatFromTo(partnerBondAvg, negAxis);
+    const rotated = dirs.map(d => applyQuat(d, q1));
 
-      if (partnerBondProj && centralBondProj) {
-        const angle = Math.atan2(
-          centralBondProj.cross(partnerBondProj).dot(axis),
-          centralBondProj.dot(partnerBondProj)
-        );
-        return flipped.map(d => rotateAround(d, axis, angle));
+    // ── Step 2: double-bond torsion via lone-pair plane normals ───────────────
+    if (bondOrder >= 2 && centralFreeDirs && centralFreeDirs.length >= 2) {
+      const freeIndices = dirs.map((_, i) => i).filter(i => !bondCloudIndices.includes(i));
+      if (freeIndices.length >= 2) {
+        const nCentral = centralFreeDirs[0].clone().cross(centralFreeDirs[1]).normalize();
+        const nPartner = rotated[freeIndices[0]].clone().cross(rotated[freeIndices[1]]).normalize();
+        const dotPos   = nCentral.dot(nPartner);
+        const targetN  = dotPos >= -dotPos ? nCentral : nCentral.clone().scale(-1);
+        const angle    = Math.atan2(targetN.clone().cross(nPartner).dot(axis), targetN.dot(nPartner));
+        return rotated.map(d => rotateAround(d, axis, angle));
       }
     }
 
-    return flipped;
+    return rotated;
   }
 
-  // Main orientation function.
-  // Returns plain data describing new positions/rotations — no scene writes.
+  // Main orientation function — returns plain data, no scene writes.
   function orientMolecule(centralAtom, bondManager, log) {
     const bonds = bondManager.getBondsOf(centralAtom);
     if (bonds.length === 0) return null;
@@ -510,8 +565,6 @@ const KWMGeometry = (() => {
     log('data', `  base dirs: ${centralDirs.map((d,i)=>`[${i}]${d.fmt()}`).join('  ')}`);
 
     const partnerUpdates = [];
-
-    // Group bonds by partner (handles double/triple bonds)
     const byPartner = new Map();
     bonds.forEach(b => {
       const pid = b.partner.id;
@@ -520,39 +573,25 @@ const KWMGeometry = (() => {
     });
 
     byPartner.forEach((bondList, pid) => {
-      const partner = bondList[0].partner;
-      log('step', `  partner: ${partner.symbol} — ${bondList.length} bond(s)`);
+      const partner   = bondList[0].partner;
+      const bondOrder = bondList.length;
+      log('step', `  partner: ${partner.symbol} — ${bondOrder} bond(s)`);
 
-      // Average bond axis if multiple bonds to same partner
       const avgAxis = new Vec3();
-      bondList.forEach(b => {
-        const d = centralDirs[b.centralCloudIndex];
-        avgAxis.add(d);
-      });
-      avgAxis.scale(1 / bondList.length).normalize();
+      bondList.forEach(b => avgAxis.add(centralDirs[b.centralCloudIndex]));
+      avgAxis.scale(1 / bondOrder).normalize();
       log('data', `    bond axis: ${avgAxis.fmt()}`);
 
-      // Partner's bonding cloud indices (clouds connected to centralAtom)
       const partnerBondClouds = bondList.map(b => b.partnerCloudIndex);
-
-      // Central atom's BONDING cloud directions — used as torsion reference so
-      // the partner's bonding clouds end up coplanar with the central's.
-      const centralBondDirs = bondList.map(b => centralDirs[b.centralCloudIndex]);
+      const centralBondSet    = new Set(bondList.map(b => b.centralCloudIndex));
+      const centralFreeDirs   = centralDirs.filter((_, i) => !centralBondSet.has(i));
 
       const mirroredDirs = mirrorDirections(
-        partner.numClouds,
-        partnerBondClouds,
-        avgAxis,
-        centralBondDirs
+        partner.numClouds, partnerBondClouds, avgAxis, centralFreeDirs, bondOrder
       );
       log('data', `    mirrored: ${mirroredDirs.map((d,i)=>`[${i}]${d.fmt()}`).join('  ')}`);
 
-      partnerUpdates.push({
-        partner,
-        bondAxis: avgAxis,
-        cloudDirections: mirroredDirs,
-        isMultiple: bondList.length > 1,
-      });
+      partnerUpdates.push({ partner, bondAxis: avgAxis, cloudDirections: mirroredDirs, isMultiple: bondOrder > 1 });
     });
 
     return { centralDirs, partnerUpdates };
@@ -744,7 +783,8 @@ class SceneView {
     this.scene.add(fill);
 
     /* [THREE.js] grid */
-    this.scene.add(new THREE.GridHelper(10, 10, 0x1e2535, 0x1e2535));
+    this._grid = new THREE.GridHelper(10, 10, 0x1e2535, 0x1e2535);
+    this.scene.add(this._grid);
 
     this._resize(wrapper);
     new ResizeObserver(() => this._resize(wrapper)).observe(wrapper);
@@ -783,6 +823,13 @@ class SceneView {
   add(obj)    { this.scene.add(obj); }
   remove(obj) { this.scene.remove(obj); }
   render()    { this.renderer.render(this.scene, this.camera); }
+
+  setTheme(day) {
+    const bg = day ? 0xe8eaf0 : 0x0b0d12, grid = day ? 0xc8ccd8 : 0x1e2535;
+    this.renderer.setClearColor(bg, 1);
+    (Array.isArray(this._grid.material) ? this._grid.material : [this._grid.material])
+      .forEach(m => m.color.setHex(grid));
+  }
 }
 
 // ── [THREE.js] AtomView ──────────────────────────────────────────────────
@@ -849,7 +896,14 @@ class AtomView {
   refresh() {
     const s = this._state;
     this.group.position.set(s.pos.x, s.pos.y, s.pos.z);
-    this.group.quaternion.set(s.rot.x, s.rot.y, s.rot.z, s.rot.w);
+
+    // If cloudDirs are set they are already world-relative directions — no
+    // group rotation needed. If not, apply atom.rot to orient the geometry.
+    if (s.cloudDirs) {
+      this.group.quaternion.set(0, 0, 0, 1); // identity
+    } else {
+      this.group.quaternion.set(s.rot.x, s.rot.y, s.rot.z, s.rot.w);
+    }
 
     const COLORS = { 1: 0x4a90e2, 2: 0xe05c5c, snap: 0xf0c040 };
 
@@ -858,7 +912,7 @@ class AtomView {
       mesh.visible = !bonded;
 
       const dir = s.getCloudDir(i);
-      /* [THREE.js] position cloud relative to core */
+      /* [THREE.js] position cloud relative to core — always in local space */
       mesh.position.set(
         dir.x * s.cloudDist,
         dir.y * s.cloudDist,
@@ -895,6 +949,9 @@ class AtomView {
 
 // ── [THREE.js] BondView ──────────────────────────────────────────────────
 // Renders a bond between two AtomState positions.
+// For double/triple bonds the band offset direction is derived from the
+// actual bonding-cloud directions so it always reflects the true π-plane,
+// and is recomputed every update() so group rotation keeps it correct.
 class BondView {
   constructor(aA, aB, order, sceneView) {
     this._aA    = aA;
@@ -902,43 +959,118 @@ class BondView {
     this._order = order;
     this._scene = sceneView;
 
-    /* [THREE.js] group holds bond ellipsoid meshes */
+    /* [THREE.js] group holds bond ellipsoid meshes — one per strand */
     this.group = new THREE.Group();
 
-    // Per-bond offsets (in local space, scaled by bond group)
-    const OFFSETS = {
-      1: [[0, 0, 0]],
-      2: [[0.32, 0, -0.32], [-0.32, 0, 0.32]],
-      3: [[0, 0, 0.38], [0.33, 0, -0.19], [-0.33, 0, -0.19]],
-    };
-    const offs = OFFSETS[Math.min(order, 3)];
-    offs.forEach(([ox, oy, oz]) => {
+    const count = Math.min(order, 3);
+    for (let i = 0; i < count; i++) {
       const m = new THREE.Mesh(
         new THREE.SphereGeometry(0.35, 16, 12),
         new THREE.MeshPhongMaterial({ color: 0x3ecf8e, transparent: true, opacity: 0.65 })
       );
-      m.position.set(ox, oy, oz);
       this.group.add(m);
-    });
+    }
 
     sceneView.add(this.group);
     this.update();
   }
 
   update() {
-    /* [THREE.js] position bond group at midpoint, orient + scale along axis */
+    /* [THREE.js] position bond group at midpoint, orient Y along bond axis */
     const a = this._aA.pos, b = this._aB.pos;
-    const mid = new THREE.Vector3((a.x+b.x)/2, (a.y+b.y)/2, (a.z+b.z)/2);
+    const mid  = new THREE.Vector3((a.x+b.x)/2, (a.y+b.y)/2, (a.z+b.z)/2);
     const dist = Math.sqrt((b.x-a.x)**2 + (b.y-a.y)**2 + (b.z-a.z)**2);
     const dir  = new THREE.Vector3(b.x-a.x, b.y-a.y, b.z-a.z).normalize();
 
     this.group.position.copy(mid);
-    /* [THREE.js] orient Y-axis of group to face along bond direction */
     this.group.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
 
-    this.group.children.forEach(m => {
-      if (m.isMesh) m.scale.set(0.65, dist, 0.65);
-    });
+    const meshes = this.group.children.filter(m => m.isMesh);
+    meshes.forEach(m => m.scale.set(0.65, dist, 0.65));
+
+    if (this._order === 1 || meshes.length === 1) {
+      // Single bond — centred, no offset needed
+      meshes[0].position.set(0, 0, 0);
+      return;
+    }
+
+    // ── Multi-bond: compute offset direction from atom's bonding cloudDirs ──
+    // We want the direction perpendicular to the bond axis that lies in the
+    // π-plane.  The bonding clouds of aA point toward aB and are spread above/
+    // below the bond axis in the π-plane — their average is the bond axis,
+    // their difference gives the π-direction.
+    //
+    // Strategy: take the two bonding cloud directions of aA (those whose
+    // world-space direction is closest to pointing toward aB), compute their
+    // cross product to get the π-plane normal, then cross that with the bond
+    // axis to get the π-offset direction.  If no cloudDirs are available,
+    // fall back to any perpendicular to the bond axis.
+
+    let offsetDir = null;
+
+    const cloudDirs = this._aA.cloudDirs;
+    if (cloudDirs && cloudDirs.length >= 2) {
+      // Find the two clouds whose directions best align with the bond direction
+      const scored = cloudDirs.map((d, i) => ({ d, i, dot: d.x*dir.x + d.y*dir.y + d.z*dir.z }));
+      scored.sort((a, b) => b.dot - a.dot);              // highest dot = most toward partner
+      const d0 = scored[0].d, d1 = scored[1].d;
+
+      // Cross product of the two bonding clouds → π-plane normal
+      const piNorm = new THREE.Vector3(
+        d0.y*d1.z - d0.z*d1.y,
+        d0.z*d1.x - d0.x*d1.z,
+        d0.x*d1.y - d0.y*d1.x
+      );
+
+      if (piNorm.lengthSq() > 1e-10) {
+        // π-offset direction = piNorm × bondDir  (perpendicular to both)
+        offsetDir = new THREE.Vector3().crossVectors(piNorm.normalize(), dir).normalize();
+      }
+    }
+
+    if (!offsetDir || offsetDir.lengthSq() < 1e-10) {
+      // Fallback: pick any axis not parallel to dir
+      const fallback = Math.abs(dir.y) < 0.9
+        ? new THREE.Vector3(0, 1, 0)
+        : new THREE.Vector3(1, 0, 0);
+      offsetDir = new THREE.Vector3().crossVectors(dir, fallback).normalize();
+    }
+    // ... (Keep your existing offsetDir and fallback calculation logic above)
+
+    const r = 0.32; // Radius of the bond bundle layout
+
+    if (this._order === 2) {
+      // Double bond: Flat arrangement [-r, +r] along the offset axis
+      const invQ = this.group.quaternion.clone().invert();
+      const localOffset = offsetDir.clone().applyQuaternion(invQ);
+      
+      meshes.forEach((m, i) => {
+        const s = i === 0 ? -r : r;
+        m.position.set(localOffset.x * s, localOffset.y * s, localOffset.z * s);
+      });
+    } 
+    else if (this._order === 3) {
+      // Triple bond: Equilateral triangle arrangement around the bond axis (dir)
+      // We generate 3 world vectors spaced 120 degrees apart, then move them to local space
+      const invQ = this.group.quaternion.clone().invert();
+      
+      // Angle increments: 0, 120, and 240 degrees in radians
+      const angles = [0, (2 * Math.PI) / 3, (4 * Math.PI) / 3];
+      
+      meshes.forEach((m, i) => {
+        // Rotate offsetDir around the main bond direction vector (dir)
+        const worldOffset = offsetDir.clone()
+          .applyAxisAngle(dir, angles[i])
+          .multiplyScalar(r);
+          
+        // Transform this specific strand's offset to the group's local frame
+        const localOffset = worldOffset.applyQuaternion(invQ);
+        m.position.copy(localOffset);
+      });
+    }
+
+    
+    
   }
 
   destroy() {
@@ -973,6 +1105,7 @@ class App {
     this._highlighted = [];         // [{atomId, ci}]
     this._mode       = 'cam';       // 'cam' | 'move'
     this._selElem    = 'H';
+    this._dayMode    = false;
 
     // ── Drag state ──
     this._drag = null;
@@ -1036,9 +1169,17 @@ class App {
     document.getElementById('btn-cam').onclick   = () => this._setMode('cam');
     document.getElementById('btn-move').onclick  = () => this._setMode('move');
     document.getElementById('btn-clear').onclick = () => this._reset();
+    document.getElementById('btn-theme').onclick  = () => this._toggleTheme();
     document.getElementById('log-clear').onclick = () => {
       document.getElementById('log-output').innerHTML = '';
     };
+  }
+
+  _toggleTheme() {
+    this._dayMode = !this._dayMode;
+    document.body.classList.toggle('day', this._dayMode);
+    this._scene.setTheme(this._dayMode);
+    document.getElementById('btn-theme').textContent = this._dayMode ? '🌙 Night' : '☀ Day';
   }
 
   // ── Mouse handlers ────────────────────────────────────────────────────────
@@ -1075,23 +1216,38 @@ class App {
     const atom = this._atoms.find(a => a.id === obj.userData.atomId);
     if (!atom) { this._drag = { mode: 'cam', px: e.clientX, py: e.clientY }; return; }
 
-    // If the atom belongs to a bonded group, move the whole group.
-    // If it is unbonded, move just that atom (for snapping).
+    const part  = atom.isCentered ? 'core' : obj.userData.part; // 'core' | 'cloud'
     const group = this._bonds.getConnectedComponent(atom);
+
     if (group.length > 1) {
+      // Bonded group — same part logic applies
+      // core + left  = translate group in XZ
+      // core + right = translate group in Y
+      // cloud + left = rotate group
+      let gmode;
+      if (part === 'core') {
+        gmode = e.button === 2 ? 'group-y' : 'group';
+      } else {
+        gmode = 'group-rot';
+      }
       this._drag = {
-        mode: 'group',
+        mode: gmode,
         group,
         initialPositions: group.map(a => ({ x: a.pos.x, y: a.pos.y, z: a.pos.z })),
         px: e.clientX, py: e.clientY,
       };
     } else {
-      // Single unbonded atom: left-drag = XZ plane, right-drag = Y axis
-      this._drag = {
-        mode: e.button === 2 ? 'y' : 'xz',
-        atom,
-        px: e.clientX, py: e.clientY,
-      };
+      // Single unbonded atom:
+      // core + left  = translate XZ
+      // core + right = translate Y
+      // cloud + left = rotate clouds
+      let amode;
+      if (part === 'core') {
+        amode = e.button === 2 ? 'y' : 'xz';
+      } else {
+        amode = 'rot';
+      }
+      this._drag = { mode: amode, atom, px: e.clientX, py: e.clientY };
     }
   }
 
@@ -1128,6 +1284,22 @@ class App {
 
     } else if (this._drag.mode === 'y') {
       this._moveAtomY(this._drag.atom, dy);
+
+    } else if (this._drag.mode === 'rot') {
+      this._rotateAtom(this._drag.atom, dx, dy);
+
+    } else if (this._drag.mode === 'group-rot') {
+      // Rotate all atoms in the group around the group's centroid
+      this._rotateGroup(this._drag.group, -dx, -dy);
+
+    } else if (this._drag.mode === 'group-y') {
+      // Translate entire bonded group along Y axis
+      const dy2 = e.clientY - this._drag.py;
+      const s   = this._pixelScale();
+      this._drag.group.forEach(a => { a.pos.y -= dy2 * s; });
+      this._drag.group.forEach(a => this._atomViews.get(a.id)?.refresh());
+      this._drag.initialPositions = this._drag.group.map(a => ({ x: a.pos.x, y: a.pos.y, z: a.pos.z }));
+      this._updateBondViews();
     }
 
     this._drag.px = e.clientX;
@@ -1198,23 +1370,63 @@ class App {
 
   _rotateAtom(atom, dx, dy) {
     if (atom.isCentered) return;
-    /* [THREE.js] quaternion rotation on the view group; copy back to state */
-    const view  = this._atomViews.get(atom.id);
     const speed = 0.016;
     const right = this._camRight();
-    const qY    = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dx * speed);
-    const qX    = new THREE.Quaternion().setFromAxisAngle(right, -dy * speed);
-    view.group.quaternion.premultiply(qY).premultiply(qX);
-    // Write rotation back to Logic state
-    const q = view.group.quaternion;
-    atom.rot = { x: q.x, y: q.y, z: q.z, w: q.w };
+    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dx * speed);
+    const qX = new THREE.Quaternion().setFromAxisAngle(right, -dy * speed);
+    const q  = qY.multiply(qX);
 
-    // Update cloud directions from rotated mesh positions
-    atom.cloudDirs = view._clouds.map(m => {
-      /* [THREE.js] getWorldPosition then convert to Logic Vec3 */
-      const wp = new THREE.Vector3();
-      m.getWorldPosition(wp);
-      return new Vec3(wp.x - atom.pos.x, wp.y - atom.pos.y, wp.z - atom.pos.z).normalize();
+    // Rotate existing cloudDirs (or base dirs) by the incremental quaternion.
+    // All directions are kept as Logic-layer Vec3 in local/world-relative space;
+    // group.quaternion stays identity (refresh() uses cloudDirs directly).
+    const currentDirs = atom.cloudDirs
+      ? atom.cloudDirs
+      : KWMGeometry.baseDirections(atom.numClouds);
+
+    atom.cloudDirs = currentDirs.map(d => {
+      const v = new THREE.Vector3(d.x, d.y, d.z).applyQuaternion(q);
+      return new Vec3(v.x, v.y, v.z).normalize();
+    });
+    // atom.rot no longer drives rendering when cloudDirs is set — clear it
+    atom.rot = { x: 0, y: 0, z: 0, w: 1 };
+
+    const view = this._atomViews.get(atom.id);
+    view.refresh();
+    this._updateBondViews();
+  }
+
+  _rotateGroup(group, dx, dy) {
+    const cx = group.reduce((s, a) => s + a.pos.x, 0) / group.length;
+    const cy = group.reduce((s, a) => s + a.pos.y, 0) / group.length;
+    const cz = group.reduce((s, a) => s + a.pos.z, 0) / group.length;
+
+    const speed = 0.016;
+    const right = this._camRight();
+    const qY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -dx * speed);
+    const qX = new THREE.Quaternion().setFromAxisAngle(right, -dy * speed);
+    const q  = qY.multiply(qX);
+
+    group.forEach(atom => {
+      // Rotate position around centroid
+      const rel = new THREE.Vector3(atom.pos.x - cx, atom.pos.y - cy, atom.pos.z - cz);
+      rel.applyQuaternion(q);
+      atom.pos.x = cx + rel.x;
+      atom.pos.y = cy + rel.y;
+      atom.pos.z = cz + rel.z;
+
+      // Rotate cloud directions by the same quaternion (same fix as _rotateAtom)
+      if (!atom.isCentered) {
+        const currentDirs = atom.cloudDirs
+          ? atom.cloudDirs
+          : KWMGeometry.baseDirections(atom.numClouds);
+        atom.cloudDirs = currentDirs.map(d => {
+          const v = new THREE.Vector3(d.x, d.y, d.z).applyQuaternion(q);
+          return new Vec3(v.x, v.y, v.z).normalize();
+        });
+        atom.rot = { x: 0, y: 0, z: 0, w: 1 };
+      }
+
+      this._atomViews.get(atom.id)?.refresh();
     });
     this._updateBondViews();
   }
