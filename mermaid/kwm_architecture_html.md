@@ -1,4 +1,4 @@
-
+´´´html
 <style>
 #erd { padding: 1rem 0; }
 #erd svg { width: 100%; height: auto; }
@@ -89,3 +89,4 @@ APP -->|"orbitBy · zoomBy"| SV
 const { svg } = await mermaid.render('kwm-svg', diagram);
 document.getElementById('erd').innerHTML = svg;
 </script>
+´´´
