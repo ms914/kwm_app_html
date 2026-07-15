@@ -1,4 +1,4 @@
-´´´html
+´´´mermaid
 <style>
 #erd { padding: 1rem 0; }
 #erd svg { width: 100%; height: auto; }
